@@ -152,26 +152,26 @@ wire tx_ip_payload_axis_tuser;
 // UDP frame connections
 wire rx_udp_hdr_valid;
 wire rx_udp_hdr_ready;
-wire [47:0] rx_udp_eth_dest_mac;
-wire [47:0] rx_udp_eth_src_mac;
-wire [15:0] rx_udp_eth_type;
-wire [3:0] rx_udp_ip_version;
-wire [3:0] rx_udp_ip_ihl;
-wire [5:0] rx_udp_ip_dscp;
-wire [1:0] rx_udp_ip_ecn;
-wire [15:0] rx_udp_ip_length;
-wire [15:0] rx_udp_ip_identification;
-wire [2:0] rx_udp_ip_flags;
-wire [12:0] rx_udp_ip_fragment_offset;
-wire [7:0] rx_udp_ip_ttl;
-wire [7:0] rx_udp_ip_protocol;
-wire [15:0] rx_udp_ip_header_checksum;
+wire [47:0] rx_udp_eth_dest_mac; //nc
+wire [47:0] rx_udp_eth_src_mac; //nc
+wire [15:0] rx_udp_eth_type; //nc
+wire [3:0] rx_udp_ip_version; //nc
+wire [3:0] rx_udp_ip_ihl; //nc
+wire [5:0] rx_udp_ip_dscp; //nc
+wire [1:0] rx_udp_ip_ecn; //nc
+wire [15:0] rx_udp_ip_length; //nc
+wire [15:0] rx_udp_ip_identification; //nc
+wire [2:0] rx_udp_ip_flags; //nc
+wire [12:0] rx_udp_ip_fragment_offset; //nc
+wire [7:0] rx_udp_ip_ttl; //nc
+wire [7:0] rx_udp_ip_protocol; //nc
+wire [15:0] rx_udp_ip_header_checksum; //nc
 wire [31:0] rx_udp_ip_source_ip;
-wire [31:0] rx_udp_ip_dest_ip;
+wire [31:0] rx_udp_ip_dest_ip; //nc
 wire [15:0] rx_udp_source_port;
 wire [15:0] rx_udp_dest_port;
 wire [15:0] rx_udp_length;
-wire [15:0] rx_udp_checksum;
+wire [15:0] rx_udp_checksum; //nc
 wire [7:0] rx_udp_payload_axis_tdata;
 wire rx_udp_payload_axis_tvalid;
 wire rx_udp_payload_axis_tready;
@@ -237,10 +237,61 @@ wire no_match = !match_cond;
 reg match_cond_reg = 0;
 reg no_match_reg = 0;
 
+//[Geralt]: address registers and cutoff switch
+reg [31:0] rx_udp_ip_source_ip_reg = 0;
+reg [15:0] rx_udp_source_port_reg = 0;
+reg [15:0] rx_udp_dest_port_reg = 0;
+reg rx_cutoff = 0;
+
+//[Geralt]: Dummy data generator
+reg [7:0] dummy_axis_tdata = 0; //Dummy->FIFO
+reg dummy_hdr_valid = 0;
+reg dummy_axis_tvalid = 0;      //Dummy->FIFO
+wire dummy_axis_tready = rx_fifo_udp_payload_axis_tready && rx_cutoff;     //Dummy<-FIFO
+reg dummy_axis_tlast = 0;       //Dummy->FIFO
+reg dummy_axis_tuser = 0;       //Dummy->FIFO
+reg [15:0] dummy_data_length = 0; //Length in Bytes: 8(header) + N(data)
+reg [7:0] message [0:11];
+initial begin //"cutoff check"
+    message[0] = 8'h63; message[1] = 8'h75; message[2] = 8'h74; message[3] = 8'h6F; message[4] = 8'h66; message[5] = 8'h66;
+    message[6] = 8'h20; message[7] = 8'h63; message[8] = 8'h68; message[9] = 8'h65; message[10] = 8'h63; message[11] = 8'h6B;
+end
+reg [3:0] message_count;
+reg message_fired;
+always @(posedge clk) begin
+    if (rst) begin
+        dummy_axis_tdata <= 0;
+        dummy_axis_tvalid <= 0;
+        dummy_axis_tlast <= 0;
+        dummy_axis_tuser <= 0;
+        message_count <= 0;
+        message_fired <= 0;
+    end else begin
+        if(dummy_axis_tready && !message_fired) begin
+            dummy_axis_tdata <= message[message_count];
+            dummy_axis_tvalid <= 1;
+            message_count <= message_count + 1;
+            if(message_count == 11) dummy_axis_tlast <= 1;
+            if(dummy_axis_tlast) begin
+                dummy_axis_tlast <= 0;
+                dummy_axis_tvalid <= 0;
+                message_fired <= 1;
+            end
+        end
+    end
+end
+
 always @(posedge clk) begin
     if (rst) begin
         match_cond_reg <= 0;
         no_match_reg <= 0;
+        //[Geralt]: Destination registers, set 0 only at reset
+        dummy_hdr_valid <= 0;
+        rx_udp_ip_source_ip_reg <= 0;
+        rx_udp_source_port_reg <= 0;
+        rx_udp_dest_port_reg <= 0;
+        rx_cutoff <= 0;
+        dummy_data_length <= 0;
     end else begin
         if (rx_udp_payload_axis_tvalid) begin
             if ((!match_cond_reg && !no_match_reg) ||
@@ -252,32 +303,42 @@ always @(posedge clk) begin
             match_cond_reg <= 0;
             no_match_reg <= 0;
         end
+        if(match_cond_reg && !rx_udp_payload_axis_tvalid) begin
+            //[Geralt]: Destination registers, overwrite mode -- no clean up set
+            dummy_hdr_valid <= 1;
+            rx_udp_ip_source_ip_reg <= rx_udp_ip_source_ip;
+            rx_udp_source_port_reg <= rx_udp_source_port;
+            rx_udp_dest_port_reg <= rx_udp_dest_port;
+            dummy_data_length <= 20;
+            rx_cutoff <= 1; //[Gerlat]: Cut off rx path upon the finish of sanity check
+        end
+        if(dummy_hdr_valid) dummy_hdr_valid <= 0; //[Geralt]: hdr_valid high for only 1 cycle
     end
 end
 
-assign tx_udp_hdr_valid = rx_udp_hdr_valid && match_cond;
-assign rx_udp_hdr_ready = (tx_eth_hdr_ready && match_cond) || no_match;
-assign tx_udp_ip_dscp = 0;
-assign tx_udp_ip_ecn = 0;
-assign tx_udp_ip_ttl = 64;
-assign tx_udp_ip_source_ip = local_ip;
-assign tx_udp_ip_dest_ip = rx_udp_ip_source_ip;
-assign tx_udp_source_port = rx_udp_dest_port;
-assign tx_udp_dest_port = rx_udp_source_port;
-assign tx_udp_length = rx_udp_length;
-assign tx_udp_checksum = 0;
+assign tx_udp_hdr_valid = rx_cutoff ? dummy_hdr_valid : (rx_udp_hdr_valid && match_cond); //[Geralt]: switch control
+assign rx_udp_hdr_ready = (tx_eth_hdr_ready && match_cond) || no_match; //[Geralt]: switch control
+assign tx_udp_ip_dscp = 0; //DONE
+assign tx_udp_ip_ecn = 0;  //DONE
+assign tx_udp_ip_ttl = 64; //DONE, time to live
+assign tx_udp_ip_source_ip = local_ip; //DONE
+assign tx_udp_ip_dest_ip = rx_cutoff ? rx_udp_ip_source_ip_reg : rx_udp_ip_source_ip; //[Geralt]: switch control
+assign tx_udp_source_port = rx_cutoff ? rx_udp_dest_port_reg : rx_udp_dest_port; //[Geralt]: switch control
+assign tx_udp_dest_port = rx_cutoff ? rx_udp_source_port_reg : rx_udp_source_port; //[Geralt]: switch control
+assign tx_udp_length = rx_cutoff ? dummy_data_length : rx_udp_length; //[Geralt]: switch control
+assign tx_udp_checksum = 0; //DONE
 
-assign tx_udp_payload_axis_tdata = tx_fifo_udp_payload_axis_tdata;
-assign tx_udp_payload_axis_tvalid = tx_fifo_udp_payload_axis_tvalid;
-assign tx_fifo_udp_payload_axis_tready = tx_udp_payload_axis_tready;
-assign tx_udp_payload_axis_tlast = tx_fifo_udp_payload_axis_tlast;
-assign tx_udp_payload_axis_tuser = tx_fifo_udp_payload_axis_tuser;
+assign tx_udp_payload_axis_tdata = tx_fifo_udp_payload_axis_tdata; //DONE
+assign tx_udp_payload_axis_tvalid = tx_fifo_udp_payload_axis_tvalid; //DONE
+assign tx_fifo_udp_payload_axis_tready = tx_udp_payload_axis_tready; //DONE
+assign tx_udp_payload_axis_tlast = tx_fifo_udp_payload_axis_tlast; //DONE
+assign tx_udp_payload_axis_tuser = tx_fifo_udp_payload_axis_tuser; //DONE
 
-assign rx_fifo_udp_payload_axis_tdata = rx_udp_payload_axis_tdata;
-assign rx_fifo_udp_payload_axis_tvalid = rx_udp_payload_axis_tvalid && match_cond_reg;
-assign rx_udp_payload_axis_tready = (rx_fifo_udp_payload_axis_tready && match_cond_reg) || no_match_reg;
-assign rx_fifo_udp_payload_axis_tlast = rx_udp_payload_axis_tlast;
-assign rx_fifo_udp_payload_axis_tuser = rx_udp_payload_axis_tuser;
+assign rx_fifo_udp_payload_axis_tdata = rx_cutoff ? dummy_axis_tdata : rx_udp_payload_axis_tdata; //[Geralt]: switch control UDP RX/Dummy to FIFO
+assign rx_fifo_udp_payload_axis_tvalid = rx_cutoff ? dummy_axis_tvalid : (rx_udp_payload_axis_tvalid && match_cond_reg); //[Geralt]: switch control
+assign rx_udp_payload_axis_tready = (rx_fifo_udp_payload_axis_tready && match_cond_reg) || no_match_reg; //FIFO to UDP RX
+assign rx_fifo_udp_payload_axis_tlast = rx_cutoff ? dummy_axis_tlast : rx_udp_payload_axis_tlast; //[Geralt]: switch control
+assign rx_fifo_udp_payload_axis_tuser = rx_cutoff ? dummy_axis_tuser : rx_udp_payload_axis_tuser; //[Geralt]: switch control
 
 // Place first payload byte onto LEDs
 reg valid_last = 0;
